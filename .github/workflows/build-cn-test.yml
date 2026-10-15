@@ -1,0 +1,59 @@
+name: Build CN as JP Test
+on:
+  push:
+    branches: [test/cn-as-jp]
+    paths: [.github/workflows/build-cn-test.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkitarm:20260610
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply experimental CN to JP bypass in cloud
+        shell: bash
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          p = Path('platform/3ds/source/main_3ds.c')
+          text = p.read_text()
+          old = '    if (memcmp(gameCode, "BMXJ", 4) == 0) return 2; /* Japan  */'
+          assert text.count(old) == 1
+          text = text.replace(old, old + '\n    /* Experimental: use the Japanese resource tables for China. */\n    if (memcmp(gameCode, "BMXC", 4) == 0) return 2; /* China test */')
+          p.write_text(text)
+          p = Path('port/port_rom.c')
+          text = p.read_text()
+          old = '    if (memcmp(code, "BMXJ", ROM_HEADER_GAME_CODE_SIZE) == 0) {'
+          assert text.count(old) == 1
+          text = text.replace(old, '    /* Experimental: China deliberately uses Japanese offsets and logic. */\n    if (memcmp(code, "BMXJ", ROM_HEADER_GAME_CODE_SIZE) == 0 ||\n        memcmp(code, "BMXC", ROM_HEADER_GAME_CODE_SIZE) == 0) {')
+          p.write_text(text)
+          PYCODE
+          git diff --check
+          git diff > cn-as-jp.patch
+      - name: Install 3DS portlibs
+        run: dkp-pacman -S --noconfirm 3ds-curl 3ds-mbedtls 3ds-zlib
+      - name: Build experimental CIA
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          export DEVKITPRO=/opt/devkitpro
+          export DEVKITARM=/opt/devkitpro/devkitARM
+          chmod +x tools/bin/bannertool tools/bin/makerom
+          export PATH="$GITHUB_WORKSPACE/tools/bin:/opt/devkitpro/tools/bin:$PATH"
+          make -C platform/3ds -j$(nproc) RENDERER=gpu REGION=any CHANNEL=beta VERSION=CN-JP-TEST BANNERTOOL="$GITHUB_WORKSPACE/tools/bin/bannertool" MAKEROM="$GITHUB_WORKSPACE/tools/bin/makerom"
+          cp platform/3ds/mzm-3ds.cia mzm-3ds-CN-JP-TEST.cia
+          sha256sum mzm-3ds-CN-JP-TEST.cia > SHA256SUMS.txt
+      - name: Upload test build
+        uses: actions/upload-artifact@v4
+        with:
+          name: mzm-3ds-CN-JP-TEST
+          path: |
+            mzm-3ds-CN-JP-TEST.cia
+            SHA256SUMS.txt
+            cn-as-jp.patch
+          if-no-files-found: error
